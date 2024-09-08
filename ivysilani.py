@@ -7,37 +7,63 @@
 import http.client
 import time
 import urllib.request, urllib.parse, urllib.error
-import urllib.request, urllib.error, urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 from io import StringIO, BytesIO
 import gzip
+import socket
 
 import util
 import sys
 import json
 import xbmc
+import xbmcaddon
 from xbmc import log
 
 __author__ = "Štěpán Ort"
 __license__ = "MIT"
 __email__ = "stepanort@gmail.com"
 
+_addon_ = xbmcaddon.Addon('plugin.video.ivysilani.cz')
+
 
 # Abstraktní třída pro výpisy
 class _ProgrammeList:
 
     def _programmeListFetch(self, params):
-        data = _fetch(PROGRAMMELIST_URL, params)
-        programmes = ET.fromstring(data)
-        output = []
-        for item in programmes:
-            programme = Programme()
-            for child in item:
-                setattr(programme, child.tag, child.text)
-            output.append(programme)
-        return output
+        try:
+            data = _fetch(PROGRAMMELIST_URL, params)
+            
+            if data is None:
+                xbmc.log("Error: No data returned from _fetch", level=xbmc.LOGERROR)
+                return []
+
+            if _addon_.getSetting('logs') == 'true':
+                xbmc.log(f"[iVysílání] Data received: {data[:100]}...", level=xbmc.LOGINFO)
+
+            if not data.strip():
+                xbmc.log("[iVysílání] Error: Data is empty", level=xbmc.LOGERROR)
+                return []
+
+            try:
+                programmes = ET.fromstring(data)
+            except ET.ParseError as e:
+                xbmc.log(f"[iVysílání] Error parsing XML data: {str(e)}", level=xbmc.LOGERROR)
+                return []
+
+            output = []
+            for item in programmes:
+                programme = Programme()
+                for child in item:
+                    setattr(programme, child.tag, child.text)
+                output.append(programme)
+            return output
+
+        except Exception as e:
+            xbmc.log(f"[iVysílání] Exception occurred: {str(e)}", level=xbmc.LOGERROR)
+            return []
+
 
     def list(self):
         params = self._identifier()
@@ -65,10 +91,10 @@ class Date(_ProgrammeList):
         try:
             date = time.strptime(date_text, date_format)
         except ValueError:
-            raise ValueError("Incorrect data format, should be YYYY-MM-DD")
+            raise ValueError("[iVysílání] Incorrect data format, should be YYYY-MM-DD")
         min_date = time.strptime(DATE_MIN, date_format)
         if date < min_date:
-            raise ValueError("Must be after " + DATE_MIN)
+            raise ValueError("[iVysílání] Must be after " + DATE_MIN)
 
     def __init__(self, date, live_channel):
         self._validate_date(date)
@@ -250,7 +276,7 @@ class _Playable:
             if urllib.request.urlopen(url).getcode() == 200:
                 self._links()[quality] = url
         except urllib.error.HTTPError as ex:
-            log("Error getting URL '" + url + "': " + str(ex), xbmc.LOGERROR)
+            log("[iVysílání] Error getting URL '" + url + "': " + str(ex), xbmc.LOGERROR)
             return None
         return url
 
@@ -376,23 +402,51 @@ def _toString(text):
         output = str(text)
     return output
 
-
 def _https_ceska_televize_fetch(url, params):
-    headers = {"Content-type": "application/x-www-form-urlencoded",
-               "Accept-encoding": "gzip",
-               "Connection": "Keep-Alive",
-               "User-Agent": "Dalvik/1.6.0 (Linux; U; Android 4.4.4; Nexus 7 Build/KTU84P)"}
-    conn = http.client.HTTPSConnection("www.ceskatelevize.cz")
-    conn.request("POST", url, urllib.parse.urlencode(params), headers)
-    response = conn.getresponse()
-    if response.status == 200:
-        if response.getheader('Content-Encoding') == 'gzip':
-            data = gzip.GzipFile(fileobj = BytesIO(response.read())).read()
+    headers = {
+        "Content-type": "application/x-www-form-urlencoded",
+        "Accept-encoding": "gzip",
+        "Connection": "Keep-Alive",
+        "User-Agent": "Dalvik/1.6.0 (Linux; U; Android 4.4.4; Nexus 7 Build/KTU84P)"
+    }
+
+    delay = 15 #často končí Filmy na Timeout, pokus o opravu
+    conn = http.client.HTTPSConnection("www.ceskatelevize.cz", timeout=delay)
+
+    try:
+        if _addon_.getSetting('logs') == 'true':
+            xbmc.log(f"Sending request to {url} with params: {params} and headers: {headers}", xbmc.LOGINFO)
+        conn.request("POST", url, urllib.parse.urlencode(params), headers)
+        response = conn.getresponse()
+        if _addon_.getSetting('logs') == 'true':
+            xbmc.log(f"[iVysílání] Response status: {response.status}", xbmc.LOGINFO)
+        if response.status == 200:
+            content_length = response.getheader('Content-Length')
+            content_encoding = response.getheader('Content-Encoding')
+            if _addon_.getSetting('logs') == 'true':
+                xbmc.log(f"[iVysílání] Content-Length: {content_length}, Content-Encoding: {content_encoding}", xbmc.LOGINFO)
+
+            raw_data = response.read()
+            if raw_data is None:
+                xbmc.log("[iVysílání] No data received from the server.", xbmc.LOGERROR)
+                return None
+
+            if content_encoding == 'gzip':
+                data = gzip.GzipFile(fileobj=BytesIO(raw_data)).read()
+            else:
+                data = raw_data
+            if _addon_.getSetting('logs') == 'true':
+                xbmc.log(f"[iVysílání] Received data: {data[:100]}...", xbmc.LOGINFO)  # Ukáže prvních 100 znaků přijatých dat
+            return data
         else:
-            data = response.read()
+            xbmc.log(f"[iVysílání] Unexpected response status: {response.status}", xbmc.LOGERROR)
+            return None
+    except (http.client.HTTPException, socket.timeout) as e:
+        xbmc.log(f"[iVysílání] Error fetching data: {e}", xbmc.LOGERROR)
+        return None
+    finally:
         conn.close()
-        return data
-    return None
+        xbmc.log("[iVysílání] Connection closed.", xbmc.LOGINFO)
 
 
 _token = None
@@ -462,9 +516,9 @@ DATE_MIN = "2005-02-01"
 TOKEN_URL = "/services/ivysilani/xml/token/"
 PROGRAMMELIST_URL = "/services/ivysilani/xml/programmelist/"
 PROGRAMMEDETAIL_URL = "/services/ivysilani/xml/programmedetail/"
-GENRELIST_URL = "/services-old/ivysilani/xml/genrelist/"
+GENRELIST_URL = "/services-old/ivysilani/xml/genrelist/" #mod
 PLAYLISTURL_URL = "/services/ivysilani/xml/playlisturl/"
-ALPHABETLIST_URL = "/services-old/ivysilani/xml/alphabetlist/"
+ALPHABETLIST_URL = "/services-old/ivysilani/xml/alphabetlist/" #mod
 
 IMAGE_WIDTH = 400  # doporučeno na TheTvDB Wiki
 
