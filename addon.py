@@ -52,34 +52,39 @@ def log(msg, level=xbmc.LOGDEBUG):
         msg = msg.encode('utf-8')
     xbmc.log("[%s] %s" % (_scriptname_, msg.__str__()), level)
 
-
 def logDbg(msg):
     log(msg, level=xbmc.LOGDEBUG)
 
-
 def logErr(msg):
     log(msg, level=xbmc.LOGERROR)
-
-
 ###############################################################################
-
 def _exception_log(exc_type, exc_value, exc_traceback):
     global _first_error_
     global _send_errors_
-    logErr(traceback.format_exception(exc_type, exc_value, exc_traceback))
+
+    # Konsolidace tracebacku do jednoho řetězce
+    tb_str = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    logErr(tb_str)  # Logování jako jeden textový blok
+
+    # GUI notifikace
     xbmcgui.Dialog().notification(_scriptname_, _toString(exc_value), xbmcgui.NOTIFICATION_ERROR)
+
+    # Nastavení odesílání chyb
     if not _first_error_:
         if xbmcgui.Dialog().yesno(_scriptname_, _lang_(30500) + "\n" + _lang_(30501)):
             _addon_.setSetting("send_errors", "true")
             _send_errors_ = (_addon_.getSetting('send_errors') == "true")
         _addon_.setSetting("first_error", "true")
         _first_error_ = (_addon_.getSetting('first_error') == "true")
+
+    # Odeslání chyb
     if _send_errors_:
         if _sendError(params, exc_type, exc_value, exc_traceback):
             xbmcgui.Dialog().notification(_scriptname_, _lang_(30502), xbmcgui.NOTIFICATION_INFO)
         else:
             xbmcgui.Dialog().notification(_scriptname_, _lang_(30503), xbmcgui.NOTIFICATION_ERROR)
 
+###############################################################################
 
 try:
     # First run
