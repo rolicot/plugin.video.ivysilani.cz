@@ -195,42 +195,47 @@ class _Playable:
             self.__links__ = {}
         return self.__links__
 
-    def url(self, quality):
+    def url(self, quality, stream_type="hls"):
         url = None
         quality = Quality(str(quality))
         if quality in self._links():
             url = self._links()[quality]
             return url
-        params = {"ID": self.ID,
-                  "playerType": "iPad",
-                  "quality": quality.quality()}
-        data = None
+        params = {"quality": quality.quality(),
+                  "streamType": stream_type,
+                  "origin": "ivysilani",
+                  "usePlayability": "true",
+                  "canPlayDrm": "true"}
 
+        if self.ID.startswith("CT"):
+            # DRM handler can't properly process format of live manifest from ct, but it looks like it is sufficient to turn off drm here ...
+            params["canPlayDrm"] = "false"
+            playlist_url = VIDEO_CHANNEL_URL + self.ID[2:]
+        else:
+            playlist_url = VIDEO_MEDIA_URL + self.ID
+
+        playlist_data = _https_ceska_televize_fetch(playlist_url, params, "GET")
         try:
-            data = _fetch(PLAYLISTURL_URL, params)
-        except Exception as ex:
+            root = json.loads(playlist_data)
+        except json.JSONDecodeError as ex:
             log(str(ex), xbmc.LOGERROR)
             return None
-        root = ET.fromstring(data)
-        if root.tag == "errors":
-            raise Exception(', '.join([e.text for e in root]))
-        playlist_url = root.text
-        resp = urllib.request.urlopen(playlist_url)
-        playlist_data = resp.read()
-        root = ET.fromstring(playlist_data)
-        videos = root.findall("smilRoot/body//video")
-        for video in videos:
-            if 'label' not in video.attrib or video.get("label") == quality.quality():
-                url = video.get("src")
+
+        url = None
+        for s in root.get("streams", []):
+            try:
+                url = s["url"]
+            except KeyError:
+                continue
+            break
+        else:
+            url = root.get("streamUrls", {}).get("main")
         if not url:
             return None
 
         if "drmOnly=true" in url:
-            return self.drmUrl(quality)
+            return self.url(quality, "dash")
 
-        switchItem = root.find("smilRoot/body/switchItem")
-        if switchItem:
-            url = switchItem.get("base") + "/" + url
         try:
             if urllib.request.urlopen(url).getcode() == 200:
                 self._links()[quality] = url
@@ -238,46 +243,6 @@ class _Playable:
             log("Error getting URL '" + url + "': " + str(ex), xbmc.LOGERROR)
             return None
 
-        return url
-
-    def drmUrl(self, quality):
-        url = None
-        params = {"ID": self.ID,
-                  "playerType": "dash",
-                  "quality": quality.quality()}
-        data = None
-        try:
-            data = _fetch(PLAYLISTURL_URL, params)
-        except Exception as ex:
-            log(str(ex), xbmc.LOGERROR)
-            return None
-
-        root = ET.fromstring(data)
-        if root.tag == "errors":
-            raise Exception(', '.join([e.text for e in root]))
-        playlist_url = root.text
-        resp = urllib.request.urlopen(playlist_url)
-        playlist_data = resp.read()
-        try:
-            root = json.loads(playlist_data)
-        except json.JSONDecodeError as ex:
-            log(str(ex), xbmc.LOGERROR)
-            return None
-
-        if not "playlist" in root or len(root["playlist"]) == 0:
-            return None
-
-        for video in root["playlist"]:
-            if 'streamUrls' in video and "main" in video["streamUrls"]:
-                url = video["streamUrls"]["main"]
-        if not url:
-            return None
-        try:
-            if urllib.request.urlopen(url).getcode() == 200:
-                self._links()[quality] = url
-        except urllib.error.HTTPError as ex:
-            log("[iVysílání] Error getting URL '" + url + "': " + str(ex), xbmc.LOGERROR)
-            return None
         return url
 
     def subs(self, subtitles_path):
@@ -402,21 +367,28 @@ def _toString(text):
         output = str(text)
     return output
 
-def _https_ceska_televize_fetch(url, params):
+def _https_ceska_televize_fetch(url, params, method="POST"):
     headers = {
-        "Content-type": "application/x-www-form-urlencoded",
         "Accept-encoding": "gzip",
         "Connection": "Keep-Alive",
         "User-Agent": "Dalvik/1.6.0 (Linux; U; Android 4.4.4; Nexus 7 Build/KTU84P)"
     }
+    if method == "POST":
+        headers["Content-type"] = "application/x-www-form-urlencoded"
+
+    if url.startswith('/'):
+        host = "www.ceskatelevize.cz"
+    else:
+        host, path = url.split('/', maxsplit=1)
+        url = '/' + path
 
     delay = 15 #často končí Filmy na Timeout, pokus o opravu
-    conn = http.client.HTTPSConnection("www.ceskatelevize.cz", timeout=delay)
+    conn = http.client.HTTPSConnection(host, timeout=delay)
 
     try:
         if _addon_.getSetting('logs') == 'true':
             xbmc.log(f"Sending request to {url} with params: {params} and headers: {headers}", xbmc.LOGINFO)
-        conn.request("POST", url, urllib.parse.urlencode(params), headers)
+        conn.request(method, url, urllib.parse.urlencode(params), headers)
         response = conn.getresponse()
         if _addon_.getSetting('logs') == 'true':
             xbmc.log(f"[iVysílání] Response status: {response.status}", xbmc.LOGINFO)
@@ -514,11 +486,12 @@ def alphabet():
 
 DATE_MIN = "2005-02-01"
 TOKEN_URL = "/services/ivysilani/xml/token/"
-PROGRAMMELIST_URL = "/services/ivysilani/xml/programmelist/"
+PROGRAMMELIST_URL = "/services-old/ivysilani/xml/programmelist/"
 PROGRAMMEDETAIL_URL = "/services/ivysilani/xml/programmedetail/"
 GENRELIST_URL = "/services-old/ivysilani/xml/genrelist/" #mod
-PLAYLISTURL_URL = "/services/ivysilani/xml/playlisturl/"
 ALPHABETLIST_URL = "/services-old/ivysilani/xml/alphabetlist/" #mod
+VIDEO_CHANNEL_URL = "api.ceskatelevize.cz/video/v1/playlist-live/v1/stream-data/channel/CH_"
+VIDEO_MEDIA_URL = "api.ceskatelevize.cz/video/v1/playlist-vod/v1/stream-data/media/external/"
 
 IMAGE_WIDTH = 400  # doporučeno na TheTvDB Wiki
 

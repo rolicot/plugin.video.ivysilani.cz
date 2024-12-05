@@ -10,6 +10,7 @@ import urllib.request, urllib.parse, urllib.error
 from collections import defaultdict
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 
 import xbmc
 import xbmcaddon
@@ -270,7 +271,7 @@ try:
             if hasattr(live_programme, "elapsedPercentage") and live_programme.elapsedPercentage:
                 plot += " (" + _toString(live_programme.elapsedPercentage) + "%)"
             if hasattr(live_programme, "synopsis") and live_programme.synopsis:
-                plot += "\n\n" + _toString(live_programme.synopsis)
+                plot += "\n\n" + BeautifulSoup(_toString(live_programme.synopsis)).get_text()
             if hasattr(live_programme, "ID") and live_programme.ID:
                 try:
                     url = _baseurl_ + "?play=" + liveChannel.ID
